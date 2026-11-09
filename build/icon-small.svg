@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>StealthPDF (small sizes)</title>
+  <!-- 16–32 px 专用简化版：去掉文字行和阴影，页面与眼睛更大、描边更粗 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6f7dff"/>
+      <stop offset="0.6" stop-color="#3b33c4"/>
+      <stop offset="1" stop-color="#1f1884"/>
+    </linearGradient>
+    <linearGradient id="page" gradientUnits="userSpaceOnUse" x1="0" y1="120" x2="0" y2="904">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.7" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <path d="M196 190 Q196 120 266 120 H620 L828 328 V834 Q828 904 758 904 H266 Q196 904 196 834 Z" fill="url(#page)"/>
+  <path d="M620 120 L620 278 Q620 328 670 328 H828 Z" fill="#b9c1ff"/>
+  <path d="M250 598 Q512 372 774 598 Q512 824 250 598 Z" fill="#ffffff" stroke="#2a2599" stroke-width="72" stroke-linejoin="round"/>
+  <circle cx="512" cy="598" r="112" fill="#2a2599"/>
+</svg>

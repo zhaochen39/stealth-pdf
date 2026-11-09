@@ -1,0 +1,20 @@
+name: ✨ 功能建议 / Feature request
+description: 希望增加的功能或改进 / Suggest an idea
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题？/ What problem does it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 期望的方案 / Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alt
+    attributes:
+      label: 其他考虑过的方案 / Alternatives considered

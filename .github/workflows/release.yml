@@ -1,0 +1,35 @@
+name: Release
+
+# 推送形如 v1.0.0 的 tag 时，自动构建安装包 + 免安装 zip，并发布到 GitHub Releases
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+      - name: Build installer (NSIS) and portable zip
+        run: npx electron-builder --win nsis zip --publish never
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/*.zip
+          generate_release_notes: true
