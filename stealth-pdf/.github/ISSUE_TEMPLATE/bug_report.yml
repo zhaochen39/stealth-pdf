@@ -1,0 +1,61 @@
+name: 🐞 Bug 反馈 / Bug report
+description: 软件出错、行为不符合预期 / Something is broken
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量填写下面的信息，能大大加快定位。
+        **隐私提示：** 日志里可能含有文件路径，贴出前请检查并按需打码。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么？/ What happened?
+      description: 你做了什么、期望的结果、实际的结果。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      placeholder: |
+        1. 打开 …
+        2. 按住触发键 …
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: StealthPDF 版本 / Version
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本 / Windows version
+      placeholder: Windows 11 23H2
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装方式 / How did you run it?
+      options:
+        - 安装包 (Setup.exe)
+        - 免安装 zip
+        - 源码 npm start
+    validations:
+      required: true
+  - type: input
+    id: trigger
+    attributes:
+      label: 使用的触发键 / Trigger key
+      placeholder: 例如 右 Alt、鼠标后退键
+  - type: textarea
+    id: log
+    attributes:
+      label: 日志 / Log
+      description: 托盘图标右键 →「打开日志文件夹」→ `stealth-pdf.log` 的相关内容。
+      render: text

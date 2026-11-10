@@ -1,7 +1,7 @@
 /* StealthPDF 渲染进程：pdf.js 负责显示，标注保存在内存，点「保存」时由主进程写入 PDF */
 (() => {
   const $ = (id) => document.getElementById(id);
-  const viewer = $('viewer'), pagesEl = $('pages');
+  const stage = $('stage'), panesEl = $('panes');
   const api = window.api;
 
   /* ---------- 提示条 ---------- */
@@ -28,16 +28,59 @@
   }
   if (!api) showError('preload 未加载（window.api 不存在），请查看日志文件');
 
-  /* ---------- 状态 ---------- */
-  let pdfDoc = null;
-  let curPath = null;
-  let scale = 1.25;
+  /* ---------- 状态 ----------
+   * 标签（tab）→ 最多两个窗格（pane）。每个窗格是一个独立的 PDF：
+   *   自己的文档、缩放、滚动位置、未保存的标注。
+   * 工具栏上的缩放 / 页码 / 撤销 / 保存，作用于「当前标签的焦点窗格」。 */
   let tool = 'hand';
   let color = '#ffd400';
-  let annos = [];          // 坐标均为「缩放比例 1」下的页面坐标（pt，左上角为原点）
-  let pages = [];          // { idx, el, canvas, overlay, pdfPage, vp, rendered }
-  let observer = null;
-  let drawing = null;
+  let tabs = [];            // { id, panes:[pane], focus, ratio, sync }
+  let activeId = null;
+  let nextTabId = 1;
+  let draggingTabId = null;
+  let lastScale = 1.25;     // 新打开的窗格沿用最近一次的缩放
+  const MIN_PANE = 260;     // 单个窗格最小宽度（px）
+
+  // pane: { path, name, doc, scale, annos, scrollTop, scrollLeft, lastTop, pages, observer, token, drawing,
+  //         el, viewer, pagesEl, titleEl, dotEl }   —— 坐标均为「缩放比例 1」下的页面坐标（pt，左上角为原点）
+
+  const baseName = (p) => p.split(/[\\/]/).pop();
+  const normPath = (p) => p.replace(/\//g, '\\').toLowerCase();
+  const activeTab = () => tabs.find((t) => t.id === activeId) || null;
+  const focusPane = (t) => (t ? t.panes[t.focus] || t.panes[0] : null);
+  const curPane = () => focusPane(activeTab());
+  const tabDirty = (t) => t.panes.some((p) => p.annos.length > 0);
+  const tabName = (t) => t.panes.map((p) => p.name).join('  │  ');
+  const hasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'));
+  const clampScale = (s) => Math.min(4, Math.max(0.4, +s.toFixed(2)));
+
+  function makePane(path, doc) {
+    return {
+      path, name: baseName(path), doc, scale: lastScale, annos: [], scrollTop: 0, scrollLeft: 0, lastTop: 0,
+      pages: [], observer: null, token: 0, drawing: null, el: null, viewer: null, pagesEl: null, titleEl: null, dotEl: null
+    };
+  }
+
+  async function loadPane(res) {
+    if (res.error) { showError(baseName(res.path) + '：' + res.error); return null; }
+    try {
+      const doc = await pdfjsLib.getDocument({ data: res.data }).promise;
+      return makePane(res.path, doc);
+    } catch (err) {
+      showError('无法打开「' + baseName(res.path) + '」（可能已加密或已损坏）');
+      console.error(err);
+      return null;
+    }
+  }
+
+  /** 在所有标签的所有窗格里找某个文件 */
+  function findPane(path) {
+    for (const t of tabs) {
+      const i = t.panes.findIndex((p) => normPath(p.path) === normPath(path));
+      if (i >= 0) return { tab: t, idx: i };
+    }
+    return null;
+  }
 
   /* ---------- 工具 / 颜色 ---------- */
   function setColor(c) {
@@ -56,65 +99,101 @@
     if ((t === 'pen' || t === 'text') && color.toLowerCase() === '#ffd400') setColor('#e53935');
   }
 
-  /* ---------- 标签页 ----------
-   * 每个标签独立保存：文档、缩放、滚动位置、未保存的标注。
-   * 全局变量 pdfDoc / curPath / scale / annos 始终是「当前标签」的镜像。 */
-  let tabs = [];            // { id, path, name, doc, scale, annos, scrollTop }
-  let activeId = null;
-  let nextTabId = 1;
-  let buildToken = 0;       // 快速切换标签时，丢弃过期的页面构建
-  let draggingTabId = null;
-
-  const baseName = (p) => p.split(/[\\/]/).pop();
-  const normPath = (p) => p.replace(/\//g, '\\').toLowerCase();
-  const activeTab = () => tabs.find((t) => t.id === activeId) || null;
-  const hasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'));
-
-  function saveActiveState() {
+  /* ---------- 工具栏同步（缩放 / 页码 / 分屏按钮 / 标题） ---------- */
+  function syncToolbar() {
     const t = activeTab();
-    if (!t) return;
-    t.scrollTop = viewer.scrollTop;
-    t.scale = scale;
-    t.annos = annos;
+    const p = focusPane(t);
+    const split = !!t && t.panes.length === 2;
+    $('btnSplit').classList.toggle('active', split);
+    $('btnSplit').title = split ? '取消分屏：关闭右侧窗格 (Ctrl+\\)' : '分屏：在右侧再打开一个 PDF (Ctrl+\\)';
+    $('splitTools').hidden = !split;
+    $('btnSync').classList.toggle('active', !!(t && t.sync));
+    if (!p) {
+      $('zoomLabel').textContent = Math.round(lastScale * 100) + '%';
+      $('pageTotal').textContent = '/ 0';
+      $('pageInput').value = 1;
+      document.title = 'StealthPDF';
+      return;
+    }
+    $('zoomLabel').textContent = Math.round(p.scale * 100) + '%';
+    $('pageTotal').textContent = '/ ' + p.doc.numPages;
+    $('pageInput').max = p.doc.numPages;
+    if (p.pages.length) $('pageInput').value = currentPageIndex(p) + 1;
+    document.title = 'StealthPDF - ' + (split ? tabName(t) : p.name);
+    t.panes.forEach((q, i) => {
+      if (!q.el) return;
+      q.el.classList.toggle('focus', i === t.focus);
+      q.titleEl.textContent = q.name;
+      q.titleEl.title = q.path;
+      q.dotEl.hidden = q.annos.length === 0;
+    });
+  }
+  const markDirty = () => { renderTabs(); syncToolbar(); };
+
+  /* ---------- 标签页 ---------- */
+  function saveState(t) {
+    t.panes.forEach((p) => {
+      if (!p.viewer) return;
+      p.scrollTop = p.viewer.scrollTop;
+      p.scrollLeft = p.viewer.scrollLeft;
+    });
   }
 
-  async function activateTab(id, force) {
+  /** 离开一个标签：记住滚动位置，拆掉它的 DOM，并让还在进行的页面构建作废 */
+  function leaveTab(t) {
+    saveState(t);
+    endPan();
+    t.panes.forEach((p) => {
+      p.token++;
+      if (p.observer) p.observer.disconnect();
+      p.observer = null; p.pages = []; p.drawing = null;
+      p.el = p.viewer = p.pagesEl = p.titleEl = p.dotEl = null;
+    });
+    panesEl.innerHTML = '';
+  }
+
+  async function showTab(t) {
+    const id = t.id;
+    layout(t);
+    renderTabs();
+    syncToolbar();
+    await Promise.all(t.panes.map((p) => buildPages(p)));
+    if (activeId !== id) return;                       // 构建期间被切走了
+    t.panes.forEach((p) => {
+      if (!p.viewer) return;
+      p.viewer.scrollLeft = p.scrollLeft;
+      p.viewer.scrollTop = p.scrollTop;
+      p.lastTop = p.viewer.scrollTop;
+    });
+    syncToolbar();
+  }
+
+  async function activateTab(id, force, paneIdx) {
     const t = tabs.find((x) => x.id === id);
     if (!t) return;
-    if (id !== activeId || force) saveActiveState();
+    if (typeof paneIdx === 'number' && t.panes[paneIdx]) t.focus = paneIdx;
+    if (id === activeId && !force) { syncToolbar(); return; }
+    const old = activeTab();
+    if (old) leaveTab(old);
     activeId = id;
-    pdfDoc = t.doc;
-    curPath = t.path;
-    scale = t.scale;
-    annos = t.annos;
-    drawing = null;
-    document.title = 'StealthPDF - ' + t.name;
-    $('pageTotal').textContent = '/ ' + t.doc.numPages;
-    $('pageInput').max = t.doc.numPages;
-    renderTabs();
-    await buildPages();
-    if (activeId === id) viewer.scrollTop = t.scrollTop;   // 构建期间没有被切走才恢复滚动位置
+    await showTab(t);
   }
 
   /** 打开一批文件：已打开的直接切过去，其余各开一个新标签，最后激活最后一个 */
   async function openFiles(list) {
     if (!list || !list.length) return;
-    let last = null;
+    let last = null, lastIdx = 0;
     for (const res of list) {
       if (res.error) { showError(baseName(res.path) + '：' + res.error); continue; }
-      const exist = tabs.find((t) => normPath(t.path) === normPath(res.path));
-      if (exist) { last = exist.id; continue; }
-      try {
-        const doc = await pdfjsLib.getDocument({ data: res.data }).promise;
-        const t = { id: nextTabId++, path: res.path, name: baseName(res.path), doc, scale, annos: [], scrollTop: 0 };
-        tabs.push(t);
-        last = t.id;
-      } catch (err) {
-        showError('无法打开「' + baseName(res.path) + '」（可能已加密或已损坏）');
-        console.error(err);
-      }
+      const exist = findPane(res.path);
+      if (exist) { last = exist.tab.id; lastIdx = exist.idx; continue; }
+      const p = await loadPane(res);
+      if (!p) continue;
+      const t = { id: nextTabId++, panes: [p], focus: 0, ratio: 0.5, sync: false };
+      tabs.push(t);
+      last = t.id; lastIdx = 0;
     }
-    if (last !== null) await activateTab(last);
+    if (last !== null) await activateTab(last, false, lastIdx);
   }
 
   /** 页内确认弹窗（不用系统 confirm：隐身模式下系统对话框期间窗口可能被隐藏） */
@@ -146,28 +225,27 @@
   async function closeTab(id) {
     const t = tabs.find((x) => x.id === id);
     if (!t) return;
-    const dirty = (id === activeId ? annos : t.annos).length > 0;
-    if (dirty && !(await confirmDialog('关闭「' + t.name + '」？', '这个标签页里有未保存的标注，关闭后会丢失。', '不保存，直接关闭'))) return;
+    if (tabDirty(t) && !(await confirmDialog('关闭「' + tabName(t) + '」？', '这个标签页里有未保存的标注，关闭后会丢失。', '不保存，直接关闭'))) return;
     const idx = tabs.indexOf(t);
+    if (idx < 0) return;
     const wasActive = id === activeId;
+    if (wasActive) leaveTab(t);
     tabs.splice(idx, 1);
-    try { t.doc.destroy(); } catch (_) {}
+    t.panes.forEach((p) => { try { p.doc.destroy(); } catch (_) {} });
     if (!wasActive) return renderTabs();
-    if (tabs.length) await activateTab(tabs[Math.min(idx, tabs.length - 1)].id);
+    if (tabs.length) { activeId = null; await activateTab(tabs[Math.min(idx, tabs.length - 1)].id, true); }
     else showEmpty();
   }
 
   function showEmpty() {
-    buildToken++;
-    if (observer) observer.disconnect();
-    activeId = null; pdfDoc = null; curPath = null; annos = []; drawing = null;
-    pagesEl.innerHTML = '';
-    pages = [];
+    const t = activeTab();
+    if (t) leaveTab(t);
+    activeId = null;
+    panesEl.innerHTML = '';
+    stage.classList.remove('split');
     $('empty').style.display = '';
-    $('pageTotal').textContent = '/ 0';
-    $('pageInput').value = 1;
-    document.title = 'StealthPDF';
     renderTabs();
+    syncToolbar();
   }
 
   function switchBy(step) {
@@ -176,22 +254,25 @@
     activateTab(tabs[(i + step + tabs.length) % tabs.length].id);
   }
 
+  const SPLIT_ICON = '<svg class="ic tab-split" aria-hidden="true"><use href="#i-split"/></svg>';
+
   function renderTabs() {
     const bar = $('tabbar'), box = $('tabs');
     bar.hidden = tabs.length === 0;
     box.innerHTML = '';
     tabs.forEach((t) => {
-      const dirty = (t.id === activeId ? annos : t.annos).length > 0;
+      const dirty = tabDirty(t);
       const el = document.createElement('div');
-      el.className = 'tab' + (t.id === activeId ? ' active' : '');
+      el.className = 'tab' + (t.id === activeId ? ' active' : '') + (t.panes.length === 2 ? ' split' : '');
       el.setAttribute('role', 'tab');
       el.draggable = true;
       el.dataset.id = t.id;
-      el.title = t.path + (dirty ? '\n（有未保存的标注）' : '');
+      el.title = t.panes.map((p) => p.path).join('\n') + (dirty ? '\n（有未保存的标注）' : '');
       if (dirty) { const d = document.createElement('span'); d.className = 'tab-dot'; el.appendChild(d); }
+      if (t.panes.length === 2) el.insertAdjacentHTML('beforeend', SPLIT_ICON);
       const title = document.createElement('span');
       title.className = 'tab-title';
-      title.textContent = t.name;
+      title.textContent = tabName(t);
       el.appendChild(title);
       const x = document.createElement('button');
       x.className = 'tab-close';
@@ -249,50 +330,254 @@
     $('tabs').scrollLeft += e.deltaY || e.deltaX;
   }, { passive: false });
 
-  /* ---------- 渲染 ---------- */
-  async function buildPages() {
-    const token = ++buildToken;
-    if (observer) observer.disconnect();
-    pagesEl.innerHTML = '';
-    pages = [];
+  /* ---------- 窗格布局 ---------- */
+  function layout(t) {
+    panesEl.innerHTML = '';
+    stage.classList.toggle('split', t.panes.length === 2);
     $('empty').style.display = 'none';
+    t.panes.forEach((p, i) => {
+      if (i === 1) {
+        const sp = document.createElement('div');
+        sp.className = 'splitter';
+        sp.title = '拖动调整宽度，双击恢复 50%';
+        bindSplitter(sp, t);
+        panesEl.appendChild(sp);
+      }
+      createPaneDom(t, p);
+    });
+    applyRatio(t);
+  }
 
-    const doc = pdfDoc;
+  function createPaneDom(t, p) {
+    const el = document.createElement('section');
+    el.className = 'pane';
+    el.innerHTML =
+      '<header class="pane-head"><span class="pane-dot" hidden></span><span class="pane-title"></span>' +
+      '<button class="pane-close" title="关闭这个窗格">×</button></header>' +
+      '<div class="viewer"><div class="pages"></div></div>';
+    p.el = el;
+    p.titleEl = el.querySelector('.pane-title');
+    p.dotEl = el.querySelector('.pane-dot');
+    p.viewer = el.querySelector('.viewer');
+    p.pagesEl = el.querySelector('.pages');
+    el.querySelector('.pane-close').onclick = () => closePane(t, p);
+    // 按下窗格任意位置 → 它成为焦点窗格（工具栏的缩放 / 保存等作用于它）
+    el.addEventListener('pointerdown', () => {
+      const i = t.panes.indexOf(p);
+      if (t === activeTab() && i >= 0 && t.focus !== i) { t.focus = i; syncToolbar(); }
+    }, true);
+    bindViewer(t, p);
+    panesEl.appendChild(el);
+  }
+
+  function applyRatio(t) {
+    if (t.panes.length === 2 && t.panes[0].el && t.panes[1].el) {
+      t.panes[0].el.style.flex = '0 0 calc(' + (t.ratio * 100) + '% - 3px)';
+      t.panes[1].el.style.flex = '1 1 0';
+    } else if (t.panes[0] && t.panes[0].el) {
+      t.panes[0].el.style.flex = '1 1 auto';
+    }
+  }
+
+  function bindSplitter(sp, t) {
+    let drag = null;
+    sp.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      drag = e.pointerId;
+      try { sp.setPointerCapture(e.pointerId); } catch (_) {}
+      document.body.classList.add('resizing');
+      e.preventDefault();
+    });
+    sp.addEventListener('pointermove', (e) => {
+      if (drag !== e.pointerId) return;
+      const r = panesEl.getBoundingClientRect();
+      const lo = Math.min(0.5, MIN_PANE / r.width), hi = 1 - lo;
+      t.ratio = Math.min(hi, Math.max(lo, (e.clientX - r.left) / r.width));
+      applyRatio(t);
+    });
+    const end = () => { drag = null; document.body.classList.remove('resizing'); };
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((n) => sp.addEventListener(n, end));
+    sp.addEventListener('dblclick', () => { t.ratio = 0.5; applyRatio(t); });
+  }
+
+  /* ---------- 分屏操作 ---------- */
+  /** 进入分屏前，按「半屏宽度」算出适合的缩放 */
+  async function halfFitScale(p) {
+    const first = await p.doc.getPage(1);
+    const w = first.getViewport({ scale: 1 }).width;
+    const half = (stage.clientWidth - 6) / 2;
+    return clampScale((half - 14 - 56) / w);
+  }
+
+  /** 把一个窗格加到当前（单窗格）标签的右侧 */
+  async function addSplitPane(t, pane) {
+    if (t.panes.length !== 1) return;
+    const keep = tabs.indexOf(t) >= 0;
+    if (!keep) return;
+    const left = t.panes[0];
+    left.prevScale = left.scale;
+    pane.prevScale = pane.scale;
+    left.scale = await halfFitScale(left);
+    pane.scale = await halfFitScale(pane);
+    left.scrollTop = left.viewer ? left.viewer.scrollTop : left.scrollTop;
+    if (t === activeTab()) leaveTab(t);
+    t.panes.push(pane);
+    t.focus = 1; t.ratio = 0.5; t.sync = false;
+    if (t.id === activeId) await showTab(t);
+    else renderTabs();
+    toast('已分屏：左 ' + left.name + ' ｜ 右 ' + pane.name);
+  }
+
+  async function splitBrowse() {
+    const t = activeTab();
+    if (!t || t.panes.length !== 1) return;
+    if (!pdfReady || !api) return showError('组件未加载，无法打开文件');
+    let res;
+    try { res = await api.open(); } catch (err) { return showError(String((err && err.message) || err)); }
+    if (!res || !res.length) return;
+    if (res.length > 1) toast('分屏一次只能放一个文件，已取第一个');
+    await splitWithResult(t, res[0]);
+  }
+
+  async function splitWithResult(t, res) {
+    if (res.error) return showError(baseName(res.path) + '：' + res.error);
+    const exist = findPane(res.path);
+    if (exist) {
+      if (exist.tab === t) return toast('「' + baseName(res.path) + '」已经在这个标签里了');
+      return splitWithTab(t, exist.tab);
+    }
+    const p = await loadPane(res);
+    if (p) await addSplitPane(t, p);
+  }
+
+  /** 把另一个（单窗格的）标签并进当前标签右侧 */
+  async function splitWithTab(t, other) {
+    if (other.panes.length !== 1) return toast('那个标签本身已经是分屏，不能再并入');
+    const pane = other.panes[0];
+    const i = tabs.indexOf(other);
+    if (i < 0) return;
+    tabs.splice(i, 1);                      // pane 对象（含未保存的标注）原样搬过去，不销毁文档
+    await addSplitPane(t, pane);
+  }
+
+  function openSplitChooser(t) {
+    const m = $('smodal'), list = $('sList');
+    const others = tabs.filter((x) => x !== t && x.panes.length === 1);
+    list.innerHTML = '';
+    others.forEach((o) => {
+      const b = document.createElement('button');
+      b.className = 'split-item';
+      b.textContent = o.panes[0].name + (o.panes[0].annos.length ? '（有未保存标注）' : '');
+      b.title = o.panes[0].path;
+      b.onclick = () => { close(); splitWithTab(t, o); };
+      list.appendChild(b);
+    });
+    $('sListWrap').hidden = others.length === 0;
+    const onKey = (e) => { e.stopImmediatePropagation(); if (e.key === 'Escape') { e.preventDefault(); close(); } };
+    const close = () => { m.hidden = true; window.removeEventListener('keydown', onKey, true); };
+    $('sBrowse').onclick = () => { close(); splitBrowse(); };
+    $('sCancel').onclick = close;
+    m.onmousedown = (e) => { if (e.target === m) close(); };
+    window.addEventListener('keydown', onKey, true);
+    m.hidden = false;
+  }
+
+  async function toggleSplit() {
+    const t = activeTab();
+    if (!t) return toast('请先打开一个 PDF，再分屏');
+    if (t.panes.length === 2) return closePane(t, t.panes[1]);
+    if (tabs.some((x) => x !== t && x.panes.length === 1)) openSplitChooser(t);
+    else splitBrowse();
+  }
+
+  /** 关闭一个窗格；分屏标签只剩一个窗格时恢复成普通标签 */
+  async function closePane(t, p) {
+    if (t.panes.length < 2) return closeTab(t.id);
+    if (p.annos.length && !(await confirmDialog('关闭「' + p.name + '」？', '这个窗格里有未保存的标注，关闭后会丢失。', '不保存，直接关闭'))) return;
+    const i = t.panes.indexOf(p);
+    if (tabs.indexOf(t) < 0 || i < 0 || t.panes.length < 2) return;
+    const wasActive = t.id === activeId;
+    if (wasActive) leaveTab(t);
+    t.panes.splice(i, 1);
+    try { p.doc.destroy(); } catch (_) {}
+    const rest = t.panes[0];
+    if (rest.prevScale) { rest.scale = rest.prevScale; delete rest.prevScale; }
+    t.focus = 0; t.sync = false; t.ratio = 0.5;
+    if (wasActive) await showTab(t);
+    else renderTabs();
+  }
+
+  async function swapPanes() {
+    const t = activeTab();
+    if (!t || t.panes.length !== 2) return;
+    leaveTab(t);
+    t.panes.reverse();
+    t.focus = 1 - t.focus;
+    t.ratio = 1 - t.ratio;
+    await showTab(t);
+  }
+
+  function toggleSync() {
+    const t = activeTab();
+    if (!t || t.panes.length !== 2) return;
+    t.sync = !t.sync;
+    syncToolbar();
+    toast(t.sync ? '同步滚动已开启：两侧一起滚动' : '同步滚动已关闭');
+  }
+
+  function focusOther() {
+    const t = activeTab();
+    if (!t || t.panes.length !== 2) return;
+    t.focus = 1 - t.focus;
+    syncToolbar();
+  }
+
+  /* ---------- 渲染 ---------- */
+  async function buildPages(p) {
+    const token = ++p.token;
+    if (p.observer) p.observer.disconnect();
+    const viewer = p.viewer, pagesEl = p.pagesEl;
+    if (!viewer || !pagesEl) return;
+    pagesEl.innerHTML = '';
+    p.pages = [];
+
+    const doc = p.doc;
     const list = await Promise.all(
       Array.from({ length: doc.numPages }, (_, i) => doc.getPage(i + 1))
     );
-    if (token !== buildToken) return;      // 期间切换了标签，放弃这次构建
-    observer = new IntersectionObserver((entries) => {
-      entries.forEach(en => { if (en.isIntersecting) renderPage(pages[+en.target.dataset.idx]); });
+    if (token !== p.token) return;          // 期间切换了标签 / 重建了窗格，放弃这次构建
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(en => { if (en.isIntersecting && token === p.token) renderPage(p, p.pages[+en.target.dataset.idx]); });
     }, { root: viewer, rootMargin: '700px 0px' });
+    p.observer = observer;
 
     list.forEach((pdfPage, idx) => {
-      const vp = pdfPage.getViewport({ scale });
+      const vp = pdfPage.getViewport({ scale: p.scale });
       const el = document.createElement('div');
       el.className = 'page';
       el.dataset.idx = idx;
       el.style.width = vp.width + 'px';
       el.style.height = vp.height + 'px';
       pagesEl.appendChild(el);
-      pages.push({ idx, el, pdfPage, vp, canvas: null, overlay: null, rendered: false });
+      p.pages.push({ idx, el, pdfPage, vp, canvas: null, overlay: null, rendered: false });
       observer.observe(el);
     });
-    updateZoomLabel();
+    if (activeTab() && focusPane(activeTab()) === p) syncToolbar();
   }
 
-  async function renderPage(p) {
-    if (p.rendered) return;
-    p.rendered = true;
+  async function renderPage(p, pg) {
+    if (!pg || pg.rendered) return;
+    pg.rendered = true;
     const dpr = window.devicePixelRatio || 1;
-    const vp = p.vp;
+    const vp = pg.vp;
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.floor(vp.width * dpr);
     canvas.height = Math.floor(vp.height * dpr);
     canvas.style.width = vp.width + 'px';
     canvas.style.height = vp.height + 'px';
-    p.el.appendChild(canvas);
-    p.canvas = canvas;
+    pg.el.appendChild(canvas);
+    pg.canvas = canvas;
 
     const overlay = document.createElement('canvas');
     overlay.className = 'overlay';
@@ -300,16 +585,16 @@
     overlay.height = canvas.height;
     overlay.style.width = vp.width + 'px';
     overlay.style.height = vp.height + 'px';
-    p.el.appendChild(overlay);
-    p.overlay = overlay;
-    bindOverlay(p);
+    pg.el.appendChild(overlay);
+    pg.overlay = overlay;
+    bindOverlay(p, pg);
 
-    await p.pdfPage.render({
+    await pg.pdfPage.render({
       canvasContext: canvas.getContext('2d'),
       viewport: vp,
       transform: [dpr, 0, 0, dpr, 0, 0]
     }).promise;
-    drawOverlay(p);
+    drawOverlay(p, pg);
   }
 
   /* ---------- 标注绘制 ---------- */
@@ -335,78 +620,79 @@
     }
   }
 
-  function drawOverlay(p) {
-    if (!p.overlay) return;
+  function drawOverlay(p, pg) {
+    if (!pg || !pg.overlay) return;
     const dpr = window.devicePixelRatio || 1;
-    const ctx = p.overlay.getContext('2d');
+    const ctx = pg.overlay.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, p.overlay.width, p.overlay.height);
-    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
-    annos.filter(a => a.page === p.idx).forEach(a => drawOne(ctx, a));
-    if (drawing && drawing.page === p.idx) drawOne(ctx, drawing);
+    ctx.clearRect(0, 0, pg.overlay.width, pg.overlay.height);
+    ctx.setTransform(dpr * p.scale, 0, 0, dpr * p.scale, 0, 0);
+    p.annos.filter(a => a.page === pg.idx).forEach(a => drawOne(ctx, a));
+    if (p.drawing && p.drawing.page === pg.idx) drawOne(ctx, p.drawing);
   }
 
   /* ---------- 鼠标交互（标注） ---------- */
-  function bindOverlay(p) {
-    const ov = p.overlay;
+  function bindOverlay(p, pg) {
+    const ov = pg.overlay;
     const pos = (e) => {
       const r = ov.getBoundingClientRect();
-      return [(e.clientX - r.left) / scale, (e.clientY - r.top) / scale];
+      return [(e.clientX - r.left) / p.scale, (e.clientY - r.top) / p.scale];
     };
 
     ov.addEventListener('pointerdown', (e) => {
       if (tool === 'hand' || e.button !== 0) return;
       const [x, y] = pos(e);
-      if (tool === 'text') { startTextInput(p, x, y, color); return; }
+      if (tool === 'text') { startTextInput(p, pg, x, y, color); return; }
 
       ov.setPointerCapture(e.pointerId);
       if (tool === 'highlight') {
-        drawing = { type: 'highlight', page: p.idx, x, y, w: 0, h: 0, sx: x, sy: y, color };
+        p.drawing = { type: 'highlight', page: pg.idx, x, y, w: 0, h: 0, sx: x, sy: y, color };
       } else if (tool === 'pen') {
-        drawing = { type: 'pen', page: p.idx, points: [[x, y]], width: 2, color };
+        p.drawing = { type: 'pen', page: pg.idx, points: [[x, y]], width: 2, color };
       }
-      drawOverlay(p);
+      drawOverlay(p, pg);
     });
 
     ov.addEventListener('pointermove', (e) => {
-      if (!drawing || drawing.page !== p.idx) return;
+      const d = p.drawing;
+      if (!d || d.page !== pg.idx) return;
       const [x, y] = pos(e);
-      if (drawing.type === 'highlight') {
-        drawing.x = Math.min(x, drawing.sx);
-        drawing.y = Math.min(y, drawing.sy);
-        drawing.w = Math.abs(x - drawing.sx);
-        drawing.h = Math.abs(y - drawing.sy);
+      if (d.type === 'highlight') {
+        d.x = Math.min(x, d.sx);
+        d.y = Math.min(y, d.sy);
+        d.w = Math.abs(x - d.sx);
+        d.h = Math.abs(y - d.sy);
       } else {
-        drawing.points.push([x, y]);
+        d.points.push([x, y]);
       }
-      drawOverlay(p);
+      drawOverlay(p, pg);
     });
 
     const finish = () => {
-      if (!drawing || drawing.page !== p.idx) return;
-      const d = drawing;
-      drawing = null;
+      const d = p.drawing;
+      if (!d || d.page !== pg.idx) return;
+      p.drawing = null;
       if (d.type === 'highlight') {
-        if (d.w < 2 || d.h < 2) { drawOverlay(p); return; }
+        if (d.w < 2 || d.h < 2) { drawOverlay(p, pg); return; }
         delete d.sx; delete d.sy;
       }
-      annos.push(d);
-      drawOverlay(p);
-      renderTabs();                         // 刷新标签上的「未保存」圆点
+      p.annos.push(d);
+      drawOverlay(p, pg);
+      markDirty();                          // 刷新标签 / 窗格上的「未保存」圆点
     };
     ov.addEventListener('pointerup', finish);
     ov.addEventListener('pointercancel', finish);
   }
 
-  function startTextInput(p, x, y, c) {
+  function startTextInput(p, pg, x, y, c) {
     const size = 16;
     const input = document.createElement('input');
     input.className = 'text-input';
-    input.style.left = x * scale + 'px';
-    input.style.top = y * scale + 'px';
-    input.style.fontSize = size * scale + 'px';
+    input.style.left = x * p.scale + 'px';
+    input.style.top = y * p.scale + 'px';
+    input.style.fontSize = size * p.scale + 'px';
     input.style.color = c;
-    p.el.appendChild(input);
+    pg.el.appendChild(input);
     setTimeout(() => input.focus(), 0);
 
     let done = false;
@@ -416,9 +702,9 @@
       const text = input.value.trim();
       input.remove();
       if (save && text) {
-        annos.push({ type: 'text', page: p.idx, x, y, text, size, color: c });
-        drawOverlay(p);
-        renderTabs();
+        p.annos.push({ type: 'text', page: pg.idx, x, y, text, size, color: c });
+        drawOverlay(p, pg);
+        markDirty();
       }
     };
     input.addEventListener('keydown', (e) => {
@@ -430,102 +716,115 @@
   }
 
   function undo() {
-    const a = annos.pop();
+    const p = curPane();
+    if (!p) return;
+    const a = p.annos.pop();
     if (!a) return;
-    const p = pages[a.page];
-    if (p) drawOverlay(p);
-    renderTabs();
+    drawOverlay(p, p.pages[a.page]);
+    markDirty();
   }
 
   /* ---------- 缩放 / 翻页 ---------- */
-  function updateZoomLabel() { $('zoomLabel').textContent = Math.round(scale * 100) + '%'; }
-
-  async function setScale(s) {
-    if (!pdfDoc) return;
-    const idx = currentPageIndex();
-    scale = Math.min(4, Math.max(0.4, +s.toFixed(2)));
-    await buildPages();
-    if (pages[idx]) pages[idx].el.scrollIntoView();
+  async function setScale(p, s) {
+    if (!p || !p.viewer) return;
+    const idx = currentPageIndex(p);
+    p.scale = lastScale = clampScale(s);
+    await buildPages(p);
+    const pg = p.pages[idx];
+    if (pg && p.viewer) p.viewer.scrollTop = Math.max(0, pg.el.offsetTop - 22);
+    p.lastTop = p.viewer ? p.viewer.scrollTop : 0;
+    syncToolbar();
   }
-  const zoom = (d) => setScale(scale + d);
+  const zoom = (d, p) => { p = p || curPane(); if (p) setScale(p, p.scale + d); };
 
-  async function fitWidth() {
-    if (!pdfDoc) return;
-    const first = await pdfDoc.getPage(1);
+  async function fitWidth(p) {
+    p = p || curPane();
+    if (!p || !p.viewer) return;
+    const first = await p.doc.getPage(1);
     const w = first.getViewport({ scale: 1 }).width;
-    await setScale((viewer.clientWidth - 56) / w);
+    await setScale(p, (p.viewer.clientWidth - 56) / w);
   }
 
-  function currentPageIndex() {
-    const top = viewer.getBoundingClientRect().top;
+  function currentPageIndex(p) {
+    if (!p || !p.viewer) return 0;
+    const top = p.viewer.getBoundingClientRect().top;
     let best = 0, bestDist = Infinity;
-    pages.forEach((p, i) => {
-      const d = Math.abs(p.el.getBoundingClientRect().top - top - 22);
+    p.pages.forEach((pg, i) => {
+      const d = Math.abs(pg.el.getBoundingClientRect().top - top - 22);
       if (d < bestDist) { bestDist = d; best = i; }
     });
     return best;
   }
 
-  viewer.addEventListener('scroll', () => {
-    if (!pages.length) return;
-    $('pageInput').value = currentPageIndex() + 1;
-  });
   $('pageInput').addEventListener('change', (e) => {
-    const n = Math.min(pages.length, Math.max(1, +e.target.value || 1));
-    if (pages[n - 1]) pages[n - 1].el.scrollIntoView();
+    const p = curPane();
+    if (!p || !p.viewer) return;
+    const n = Math.min(p.pages.length, Math.max(1, +e.target.value || 1));
+    if (p.pages[n - 1]) p.viewer.scrollTop = Math.max(0, p.pages[n - 1].el.offsetTop - 22);
   });
 
-  /* ---------- 滚轮 ----------
-   * 窗口需要按住 Shift 才会显示，而 Chromium 里 Shift+滚轮 = 横向滚动，
-   * 所以这里统一接管：
-   *   Ctrl+滚轮        缩放
-   *   Shift+滚轮       纵向滚动（修复点）
-   *   Shift+Alt+滚轮   横向滚动
-   *   普通滚轮         浏览器默认
-   */
-  viewer.addEventListener('wheel', (e) => {
-    if (e.ctrlKey) {
-      e.preventDefault();
-      zoom(e.deltaY < 0 ? 0.1 : -0.1);
-      return;
-    }
-    if (e.shiftKey) {
-      e.preventDefault();
-      let d = e.deltaY || e.deltaX;           // 不同平台 Shift 会把纵向增量换到 deltaX
-      if (e.deltaMode === 1) d *= 16;         // 行 -> 像素
-      else if (e.deltaMode === 2) d *= viewer.clientHeight;
-      if (e.altKey) viewer.scrollLeft += d;
-      else viewer.scrollTop += d;
-    }
-  }, { passive: false });
-
-  /* ---------- 手型：按住鼠标拖动页面平移 ----------
-   * 手型工具下，左键拖动即可平移；任何工具下，按住鼠标中键拖动同样可以平移。 */
+  /* ---------- 每个窗格的滚动 / 滚轮 / 手型平移 ---------- */
   let pan = null;
-  viewer.addEventListener('pointerdown', (e) => {
-    const middle = e.button === 1;
-    if (!middle && !(tool === 'hand' && e.button === 0)) return;
-    if (e.target.closest && e.target.closest('.text-input')) return;
-    const r = viewer.getBoundingClientRect();                                 // 点在滚动条上时不抢：让滚动条正常拖
-    if (e.clientX - r.left >= viewer.clientWidth || e.clientY - r.top >= viewer.clientHeight) return;
-    pan = { id: e.pointerId, x: e.clientX, y: e.clientY, left: viewer.scrollLeft, top: viewer.scrollTop };
-    try { viewer.setPointerCapture(e.pointerId); } catch (_) {}
-    document.body.classList.add('panning');
-    e.preventDefault();
-  });
-  viewer.addEventListener('pointermove', (e) => {
-    if (!pan || e.pointerId !== pan.id) return;
-    viewer.scrollLeft = pan.left - (e.clientX - pan.x);
-    viewer.scrollTop = pan.top - (e.clientY - pan.y);
-  });
-  const endPan = () => {
+  function endPan() {
     if (!pan) return;
-    try { viewer.releasePointerCapture(pan.id); } catch (_) {}
+    try { pan.viewer.releasePointerCapture(pan.id); } catch (_) {}
     pan = null;
     document.body.classList.remove('panning');
-  };
-  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((n) => viewer.addEventListener(n, endPan));
-  viewer.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });   // 禁用中键自动滚动圈
+  }
+
+  function bindViewer(t, p) {
+    const viewer = p.viewer;
+
+    // 滚动：更新页码；开启「同步滚动」时，另一侧移动相同的距离
+    viewer.addEventListener('scroll', () => {
+      const d = viewer.scrollTop - p.lastTop;
+      p.lastTop = viewer.scrollTop;
+      if (t === activeTab() && focusPane(t) === p && p.pages.length) $('pageInput').value = currentPageIndex(p) + 1;
+      if (!d || !t.sync || t.panes.length !== 2) return;
+      const o = t.panes[0] === p ? t.panes[1] : t.panes[0];
+      if (!o.viewer) return;
+      o.viewer.scrollTop += d;
+      o.lastTop = o.viewer.scrollTop;       // 让对侧的 scroll 事件算出 d = 0，避免来回弹
+    });
+
+    /* 滚轮：窗口需要按住 Shift 才会显示（旧版触发键），而 Chromium 里 Shift+滚轮 = 横向滚动，
+     * 所以统一接管：Ctrl+滚轮 缩放；Shift+滚轮 纵向滚动；Shift+Alt+滚轮 横向滚动；普通滚轮 浏览器默认 */
+    viewer.addEventListener('wheel', (e) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        zoom(e.deltaY < 0 ? 0.1 : -0.1, p);
+        return;
+      }
+      if (e.shiftKey) {
+        e.preventDefault();
+        let d = e.deltaY || e.deltaX;           // 不同平台 Shift 会把纵向增量换到 deltaX
+        if (e.deltaMode === 1) d *= 16;         // 行 -> 像素
+        else if (e.deltaMode === 2) d *= viewer.clientHeight;
+        if (e.altKey) viewer.scrollLeft += d;
+        else viewer.scrollTop += d;
+      }
+    }, { passive: false });
+
+    /* 手型：左键拖动平移；任何工具下，按住鼠标中键拖动同样可以平移 */
+    viewer.addEventListener('pointerdown', (e) => {
+      const middle = e.button === 1;
+      if (!middle && !(tool === 'hand' && e.button === 0)) return;
+      if (e.target.closest && e.target.closest('.text-input')) return;
+      const r = viewer.getBoundingClientRect();                                 // 点在滚动条上时不抢：让滚动条正常拖
+      if (e.clientX - r.left >= viewer.clientWidth || e.clientY - r.top >= viewer.clientHeight) return;
+      pan = { viewer, id: e.pointerId, x: e.clientX, y: e.clientY, left: viewer.scrollLeft, top: viewer.scrollTop };
+      try { viewer.setPointerCapture(e.pointerId); } catch (_) {}
+      document.body.classList.add('panning');
+      e.preventDefault();
+    });
+    viewer.addEventListener('pointermove', (e) => {
+      if (!pan || pan.viewer !== viewer || e.pointerId !== pan.id) return;
+      viewer.scrollLeft = pan.left - (e.clientX - pan.x);
+      viewer.scrollTop = pan.top - (e.clientY - pan.y);
+    });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((n) => viewer.addEventListener(n, endPan));
+    viewer.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });   // 禁用中键自动滚动圈
+  }
 
   /* ---------- 打开 / 保存 ---------- */
   async function openDialog() {
@@ -538,27 +837,34 @@
     }
   }
 
+  /** 保存焦点窗格里的文件（分屏时只保存你正在操作的那一侧） */
   async function save(asNew) {
     if (!api) return showError('preload 未加载，无法保存');
     const t = activeTab();
-    if (!t) return toast('请先打开一个 PDF');
-    if (!asNew && annos.length === 0) return toast('没有需要保存的修改');
-    const r = await api.save({ path: t.path, annotations: annos, saveAs: !!asNew });
+    const p = focusPane(t);
+    if (!p) return toast('请先打开一个 PDF');
+    if (!asNew && p.annos.length === 0) return toast('没有需要保存的修改');
+    const r = await api.save({ path: p.path, annotations: p.annos, saveAs: !!asNew });
     if (!r) return;
     const res = await api.open(r.path);       // 重新载入，标注已写入文件
     const item = res && res[0];
     if (!item || item.error) return showError('保存成功，但重新载入失败：' + ((item && item.error) || r.path));
     try {
       const doc = await pdfjsLib.getDocument({ data: item.data }).promise;
-      const old = t.doc;
-      t.doc = doc;
-      t.path = r.path;
-      t.name = baseName(r.path);
-      t.annos = annos = [];
-      if (activeId === t.id) await activateTab(t.id, true);   // 保留当前滚动位置和缩放
-      else renderTabs();
+      const old = p.doc;
+      p.doc = doc;
+      p.path = r.path;
+      p.name = baseName(r.path);
+      p.annos = [];
+      p.drawing = null;
+      if (p.viewer) {                                        // 只重建这一个窗格，保留滚动位置和缩放
+        const keep = p.viewer.scrollTop;
+        await buildPages(p);
+        if (p.viewer) { p.viewer.scrollTop = keep; p.lastTop = keep; }
+      }
+      markDirty();
       try { old.destroy(); } catch (_) {}
-      toast('已保存：' + t.name);
+      toast('已保存：' + p.name);
     } catch (err) {
       showError('保存成功，但重新载入失败');
       console.error(err);
@@ -691,7 +997,10 @@
   $('btnUndo').onclick = undo;
   $('btnZoomIn').onclick = () => zoom(0.1);
   $('btnZoomOut').onclick = () => zoom(-0.1);
-  $('btnFit').onclick = fitWidth;
+  $('btnFit').onclick = () => fitWidth();
+  $('btnSplit').onclick = toggleSplit;
+  $('btnSync').onclick = toggleSync;
+  $('btnSwap').onclick = swapPanes;
   document.querySelectorAll('.tool').forEach(b => (b.onclick = () => setTool(b.dataset.tool)));
   document.querySelectorAll('.swatch[data-color]').forEach(s => (s.onclick = () => setColor(s.dataset.color)));
   $('color').addEventListener('input', (e) => setColor(e.target.value));
@@ -706,6 +1015,7 @@
       else if (k === '=' || k === '+') { e.preventDefault(); zoom(0.1); }
       else if (k === '-') { e.preventDefault(); zoom(-0.1); }
       else if (k === '0') { e.preventDefault(); fitWidth(); }
+      else if (k === '\\') { e.preventDefault(); toggleSplit(); }
       else if (k === 'w') { e.preventDefault(); if (activeId !== null) closeTab(activeId); }
       else if (k === 'tab') { e.preventDefault(); switchBy(e.shiftKey ? -1 : 1); }
       else if (k === 'pagedown') { e.preventDefault(); switchBy(1); }
@@ -723,8 +1033,11 @@
       const tk = { h: 'hand', m: 'highlight', p: 'pen', t: 'text' }[e.key.toLowerCase()];
       if (tk) { e.preventDefault(); setTool(tk); return; }
     }
-    if (!pages.length) return;
-    // 键盘翻页
+    if (e.key === 'F6') { e.preventDefault(); focusOther(); return; }   // F6：在分屏的两个窗格间切换焦点
+    const cp = curPane();
+    if (!cp || !cp.viewer || !cp.pages.length) return;
+    // 键盘翻页（作用于焦点窗格）
+    const viewer = cp.viewer;
     const page = viewer.clientHeight * 0.9;
     switch (e.key) {
       case 'PageDown': case ' ': viewer.scrollBy({ top: page }); break;
@@ -782,4 +1095,5 @@
   setColor('#ffd400');
   setTool('hand');
   showStealth(true);
+  syncToolbar();
 })();

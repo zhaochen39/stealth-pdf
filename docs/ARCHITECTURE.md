@@ -35,7 +35,9 @@ tests/           node:test 单元测试
 
 ## 渲染进程
 
-- **标签**：全局的 `pdfDoc / curPath / scale / annos` 镜像当前标签；每个标签保存 `{id, path, name, doc, scale, annos, scrollTop}`。切换标签时保存 / 恢复，并用 `buildToken` 丢弃过期的页面构建。
+- **标签与窗格**：`tab = { id, panes: [pane], focus, ratio, sync }`，一个标签最多两个窗格。`pane = { path, name, doc, scale, annos, scrollTop, pages, observer, token, drawing, el, viewer, ... }`，每个窗格独立持有文档、缩放、滚动位置和未保存标注。工具栏的缩放 / 页码 / 撤销 / 保存作用于 `focusPane(activeTab())`。
+- **切换标签**：`leaveTab` 记录滚动位置、拆掉 DOM 并递增每个窗格的 `token`（让进行中的页面构建作废）；`showTab` 重新布局并构建各窗格，再恢复滚动位置。
+- **分屏**：`#panes` 是 flex 行，两个 `.pane` 中间夹一个 `.splitter`，左窗格宽度由 `tab.ratio` 决定。同步滚动按「滚动增量」传给另一侧（`lastTop` 记账，避免来回触发）。把另一个标签并入时，直接搬运它的 pane 对象（未保存标注随之保留）。
 - **页面构建**：每页先建占位，进入视口时才渲染（懒加载）。
 - **标注**：坐标以 PDF 页面单位存储，与缩放无关；保存时在主进程交给 `annotate.js`。
 - **手型工具**：`pointerdown` 在视图上记录起点，`setPointerCapture` 后用位移更新 `scrollLeft/Top`；中键任何工具下都可平移；点在滚动条上不触发。

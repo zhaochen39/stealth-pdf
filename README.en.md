@@ -39,6 +39,7 @@ The trigger key is **configurable**: any keyboard key, or the mouse middle / bac
 
 - 🙈 **Trigger-to-show** with a configurable trigger key
 - 📑 **Tabs**: multiple PDFs, each remembering its own zoom, scroll position and unsaved annotations; drag to reorder
+- 🪟 **Split view inside a tab**: two PDFs side by side (check answers, original vs. translation), each with its own scroll, zoom and annotations; optional synced scrolling
 - ✋ **Hand tool**: drag to pan; middle-mouse drag pans with any tool
 - 🖍 **Annotations**: highlight, pen, text (CJK supported), colors, undo; written into the PDF on save
 - 🔍 **Viewing**: continuous scroll, lazy rendering, zoom, fit width, page jump, keyboard paging
@@ -50,6 +51,11 @@ The trigger key is **configurable**: any keyboard key, or the mouse middle / bac
 
 <p align="center">
   <img src="docs/screenshots/main.png" alt="Main window" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/split.png" alt="Split view: homework on the left, answer key on the right" width="860"><br>
+  <sub>Split view: homework on the left, answer key on the right, no tab switching</sub>
 </p>
 
 <table>
@@ -104,6 +110,22 @@ The rightmost toolbar button (also in the tray menu and on `Ctrl+Alt+H`) toggles
 
 Tabs with unsaved annotations show an orange dot. Opening a file that is already open just switches to its tab.
 
+### Split view (two PDFs side by side)
+
+Typical use: check your homework against the answer key, or read an original next to its translation.
+
+| Action | Result |
+|---|---|
+| Toolbar "Split" button / `Ctrl+\` | Open another PDF on the right of the current tab. If other single-file tabs exist you can pick "Choose file…" or merge one of them in |
+| Click "Split" again | Un-split (closes the right pane) |
+| × in a pane header | Close that pane; the other stays in the tab |
+| Drag the divider | Resize; double-click to reset to 50% |
+| Click a pane / `F6` | Change the focused pane (blue line under its header) |
+| Toolbar "Sync scroll" | One pane scrolls, the other moves by the same distance |
+| Toolbar "Swap" | Swap left and right |
+
+Notes: the two panes are fully independent (zoom, scroll, unsaved annotations, with orange dots on the tab and the pane header). Zoom, page number, undo, save and fit-width act on the **focused pane**; Save writes only that pane's file. Entering split view fits both panes to half width and un-splitting restores the previous zoom. A tab holds at most two panes (no top/bottom split).
+
 ### Tools
 
 | Tool | Key | Usage |
@@ -124,7 +146,9 @@ Tabs with unsaved annotations show an orange dot. Opening a file that is already
 | Ctrl+O | Open (multi-select) |
 | Ctrl+S / Ctrl+Shift+S | Save / Save as |
 | Ctrl+Z | Undo annotation |
-| Ctrl+W | Close tab |
+| Ctrl+W | Close tab (whole tab when split) |
+| Ctrl+\ | Split / un-split |
+| F6 | Switch focused pane in split view |
 | Ctrl+Tab / Ctrl+Shift+Tab (or Ctrl+PageDown / PageUp) | Next / previous tab |
 | Ctrl+1 … 8 / Ctrl+9 | N-th tab / last tab |
 | Ctrl + wheel / Ctrl + `+` / `-` | Zoom |
@@ -166,8 +190,9 @@ To know the trigger key state while it is not the foreground app, StealthPDF ins
 6. Existing annotations/text cannot be edited; only new ones can be added.
 7. CJK text annotations need `simhei.ttf` or `msyh.ttf` from Windows; otherwise non-ASCII characters become `?`.
 8. Save overwrites the original file; use Save as for important documents.
-9. Quitting the app does not warn about unsaved annotations (closing a tab does); tabs are not restored on next launch.
-10. Windows 10/11 only.
+9. Quitting the app does not warn about unsaved annotations (closing a tab or pane does); tabs and split layout are not restored on next launch.
+10. Split view has at most two side-by-side panes; no top/bottom split and no drag-a-tab-to-a-side yet.
+11. Windows 10/11 only.
 
 See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for help.
 
@@ -188,7 +213,7 @@ See [docs/BUILDING.md](docs/BUILDING.md) and [docs/ARCHITECTURE.md](docs/ARCHITE
 
 ## Contributing
 
-Issues and PRs are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Ideas: restore tabs on launch, text search, editing existing annotations, rotation-aware annotation, i18n.
+Issues and PRs are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Ideas: restore tabs and split layout on launch, text search, editing existing annotations, rotation-aware annotation, i18n.
 
 ## License
 

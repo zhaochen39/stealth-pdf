@@ -1,0 +1,10 @@
+# 统一使用 LF，避免 Windows / Linux 之间的换行噪音
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.pdf binary
+
+# 内置的第三方库不参与语言统计与 diff
+renderer/vendor/** linguist-vendored
+renderer/vendor/*.js -diff

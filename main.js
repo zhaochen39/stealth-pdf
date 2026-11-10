@@ -81,7 +81,7 @@ function pdfsFromArgv(argv) {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1180,
+    width: 1280,
     height: 780,
     minWidth: 640,
     minHeight: 420,
