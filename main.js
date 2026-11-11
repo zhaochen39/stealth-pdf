@@ -12,6 +12,7 @@ const {
 const path = require('path');
 const fs = require('fs');
 const { applyAnnotations } = require('./annotate');
+const pageops = require('./pageops');
 const T = require('./trigger');
 
 let uIOhook = null;
@@ -37,7 +38,7 @@ function log(...args) {
 
 /* ---------------- 设置（持久化） ---------------- */
 // trigger：触发显示的按键（键盘键或鼠标键），详见 trigger.js；默认 Fn
-const defaults = { stealth: true, alwaysOnTop: true, skipTaskbar: false, opacity: 1, trigger: { ...T.FN_DEFAULT } };
+const defaults = { stealth: true, alwaysOnTop: true, skipTaskbar: false, opacity: 1, trigger: { ...T.FN_DEFAULT }, recent: [] };
 let settings = { ...defaults };
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 
@@ -47,6 +48,7 @@ function loadSettings() {
   } catch (_) { /* 首次运行 */ }
   settings.opacity = clampOpacity(settings.opacity);
   settings.trigger = T.normalize(settings.trigger);
+  settings.recent = Array.isArray(settings.recent) ? settings.recent.filter(r => r && typeof r.path === 'string').slice(0, MAX_RECENT) : [];
   delete settings.triggerButton;   // 旧版本的字段
 }
 let saveTimer = null;
@@ -62,6 +64,19 @@ function clampOpacity(v) {
   return Math.min(1, Math.max(0.2, Math.round(v * 20) / 20));
 }
 
+const MAX_RECENT = 12;
+function addRecent(file) {
+  settings.recent = [{ path: file, time: Date.now() }, ...settings.recent.filter(r => r.path.toLowerCase() !== file.toLowerCase())].slice(0, MAX_RECENT);
+  saveSettings();
+}
+const settingsSnapshot = () => ({
+  stealth: settings.stealth, alwaysOnTop: settings.alwaysOnTop, skipTaskbar: settings.skipTaskbar,
+  opacity: settings.opacity, trigger: settings.trigger
+});
+function broadcastSettings() {
+  if (win && !win.isDestroyed()) win.webContents.send('settings-changed', settingsSnapshot());
+}
+
 /* ---------------- 窗口与隐身逻辑 ---------------- */
 let win = null;
 let tray = null;
@@ -69,6 +84,7 @@ let triggerDown = false;    // 触发键是否按住
 let capture = null;         // 捕获模式：{ resolve, timer }，等待用户按下想绑定的键
 let mouseHeld = false;      // 在窗口内按住鼠标（画笔拖动）时不隐藏
 let dialogOpen = false;     // 文件对话框打开期间保持显示
+let rendererHold = false;   // 渲染进程请求保持显示（如打印预览期间）
 let visible = true;
 let graceUntil = 0;         // 启动后的宽限期：窗口正常显示
 
@@ -148,7 +164,7 @@ function tick() {
   if (!win || win.isDestroyed()) return;
 
   let want;
-  if (!settings.stealth || Date.now() < graceUntil || dialogOpen || capture || !T.isBound(settings.trigger)) {
+  if (!settings.stealth || Date.now() < graceUntil || dialogOpen || rendererHold || capture || !T.isBound(settings.trigger)) {
     want = true;   // 隐身关闭 / 宽限期 / 对话框 / 正在捕获按键 / 触发键未绑定：保持显示
   } else {
     want = (triggerDown && insideWindow()) || (mouseHeld && visible);
@@ -275,11 +291,11 @@ function refreshTrayMenu() {
     },
     {
       label: '隐身时窗口置顶', type: 'checkbox', checked: settings.alwaysOnTop,
-      click: m => { settings.alwaysOnTop = m.checked; saveSettings(); applyWindowMode(); }
+      click: m => { settings.alwaysOnTop = m.checked; saveSettings(); applyWindowMode(); broadcastSettings(); }
     },
     {
       label: '隐身时隐藏任务栏图标', type: 'checkbox', checked: settings.skipTaskbar,
-      click: m => { settings.skipTaskbar = m.checked; saveSettings(); applyWindowMode(); }
+      click: m => { settings.skipTaskbar = m.checked; saveSettings(); applyWindowMode(); broadcastSettings(); }
     },
     { type: 'separator' },
     { label: '临时显示窗口 5 秒', click: () => { graceUntil = Date.now() + 5000; } },
@@ -327,7 +343,9 @@ ipcMain.handle('pdf:open', async (_e, p) => {
   }
   return files.map(file => {
     try {
-      return { path: file, data: new Uint8Array(fs.readFileSync(file)) };
+      const data = new Uint8Array(fs.readFileSync(file));
+      addRecent(file);
+      return { path: file, data };
     } catch (err) {
       log('读取失败', file, err);
       return { path: file, error: String(err && err.message ? err.message : err) };
@@ -335,7 +353,8 @@ ipcMain.handle('pdf:open', async (_e, p) => {
   });
 });
 
-ipcMain.handle('pdf:save', async (_e, { path: src, annotations, saveAs }) => {
+/** 保存：bytes 为渲染进程当前文档的字节（含页面编辑），没有则读 path 指向的文件 */
+ipcMain.handle('pdf:save', async (_e, { path: src, annotations, saveAs, bytes }) => {
   let target = src;
   if (saveAs) {
     const r = await withDialog(() => dialog.showSaveDialog(win, {
@@ -347,12 +366,14 @@ ipcMain.handle('pdf:save', async (_e, { path: src, annotations, saveAs }) => {
     target = r.filePath;
   }
   try {
+    const source = bytes ? Buffer.from(bytes) : null;
     if (!annotations || annotations.length === 0) {
-      if (target !== src) fs.copyFileSync(src, target);
+      if (source) fs.writeFileSync(target, source);
+      else if (target !== src) fs.copyFileSync(src, target);
     } else {
-      const out = await applyAnnotations(src, annotations);
-      fs.writeFileSync(target, out);
+      fs.writeFileSync(target, await applyAnnotations(source || src, annotations));
     }
+    addRecent(target);
     return { path: target };
   } catch (err) {
     log('保存失败', err);
@@ -360,6 +381,67 @@ ipcMain.handle('pdf:save', async (_e, { path: src, annotations, saveAs }) => {
     return null;
   }
 });
+
+/** 页面编辑：旋转 / 删除 / 插入空白页 / 提取 / 合并。返回 { ok, bytes } 或 { ok:false, error } */
+ipcMain.handle('pdf:ops', async (_e, { op, bytes, args }) => {
+  try {
+    const a = { ...(args || {}) };
+    if (a.other) a.other = Buffer.from(a.other);
+    return { ok: true, bytes: new Uint8Array(await pageops.run(op, Buffer.from(bytes), a)) };
+  } catch (err) {
+    log('页面操作失败', op, err);
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
+/** 通用「保存文件」：导出图片 / 提取出的 PDF 等。返回保存的路径，取消返回 null */
+ipcMain.handle('file:save', async (_e, { defaultName, filters, bytes }) => {
+  const r = await withDialog(() => dialog.showSaveDialog(win, {
+    title: '保存', defaultPath: defaultName, filters: filters || [{ name: 'PDF', extensions: ['pdf'] }]
+  }));
+  if (r.canceled || !r.filePath) return null;
+  try {
+    fs.writeFileSync(r.filePath, Buffer.from(bytes));
+    if (/\.pdf$/i.test(r.filePath)) addRecent(r.filePath);
+    return r.filePath;
+  } catch (err) {
+    log('保存失败', err);
+    await withDialog(() => dialog.showMessageBox(win, { type: 'error', title: '保存失败', message: String(err && err.message ? err.message : err) }));
+    return null;
+  }
+});
+
+ipcMain.handle('recent:get', () => {
+  settings.recent = settings.recent.filter(r => { try { return fs.existsSync(r.path); } catch (_) { return false; } });
+  return settings.recent;
+});
+ipcMain.handle('recent:clear', () => { settings.recent = []; saveSettings(); return []; });
+
+ipcMain.handle('settings:get', () => settingsSnapshot());
+ipcMain.handle('settings:set', (_e, key, value) => {
+  if (key === 'alwaysOnTop' || key === 'skipTaskbar') {
+    settings[key] = !!value;
+    saveSettings();
+    applyWindowMode();
+    refreshTrayMenu();
+    broadcastSettings();
+  }
+  return settingsSnapshot();
+});
+ipcMain.handle('win:hold', (_e, on) => { rendererHold = !!on; graceUntil = Math.max(graceUntil, Date.now() + 800); return rendererHold; });
+ipcMain.handle('win:peek', () => { graceUntil = Date.now() + 5000; return true; });
+ipcMain.handle('win:center', () => { graceUntil = Date.now() + 2000; if (win && !win.isDestroyed()) win.center(); return true; });
+ipcMain.handle('win:fullscreen', (_e, on) => {
+  if (!win || win.isDestroyed()) return false;
+  win.setFullScreen(typeof on === 'boolean' ? on : !win.isFullScreen());
+  return win.isFullScreen();
+});
+ipcMain.handle('app:info', () => ({
+  version: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome,
+  node: process.versions.node, platform: process.platform, userData: app.getPath('userData')
+}));
+ipcMain.handle('app:openLogs', () => require('electron').shell.openPath(app.getPath('userData')));
+ipcMain.handle('app:quit', () => { app.quit(); return true; });
 
 ipcMain.handle('trigger:get', () => settings.trigger);
 ipcMain.handle('trigger:preset', (_e, id) => {

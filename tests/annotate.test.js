@@ -80,3 +80,34 @@ test('applyAnnotations：没有中文字体时，中文文字退化为 ? 但不�
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('applyAnnotations：支持传入字节，并写入下划线 / 删除线 / 矩形 / 文字选区高亮', async () => {
+  const doc = await PDFDocument.create();
+  doc.addPage([595, 842]);
+  const bytes = await doc.save();
+  const out = await applyAnnotations(bytes, [
+    { type: 'highlight', page: 0, rects: [[50, 100, 200, 14], [50, 116, 120, 14]], color: '#ffd400' },
+    { type: 'underline', page: 0, rects: [[50, 200, 200, 14]], color: '#e53935' },
+    { type: 'strike', page: 0, rects: [[50, 240, 200, 14]], color: '#e53935' },
+    { type: 'rect', page: 0, x: 60, y: 300, w: 120, h: 60, width: 2, color: '#1e88e5' }
+  ]);
+  assert.equal((await PDFDocument.load(out)).getPageCount(), 1);
+  assert.ok(out.length > bytes.length);
+});
+
+test('applyAnnotations：旋转页面 / 带 CropBox 的页面也能写入，且标注落在页面范围内', async () => {
+  const { degrees } = require('pdf-lib');
+  for (const rot of [0, 90, 180, 270]) {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([600, 800]);
+    page.setCropBox(20, 30, 500, 700);
+    page.setRotation(degrees(rot));
+    const out = await applyAnnotations(await doc.save(), [
+      { type: 'highlight', page: 0, x: 10, y: 10, w: 100, h: 20, color: '#ffd400', rot },
+      { type: 'text', page: 0, x: 40, y: 60, text: 'rot ' + rot, size: 14, color: '#000000', rot }
+    ]);
+    const re = await PDFDocument.load(out);
+    assert.equal(re.getPageCount(), 1);
+    assert.equal(re.getPage(0).getRotation().angle, rot);
+  }
+});

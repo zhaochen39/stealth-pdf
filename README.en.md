@@ -41,13 +41,22 @@ The trigger key is **configurable**: any keyboard key, or the mouse middle / bac
 - 📑 **Tabs**: multiple PDFs, each remembering its own zoom, scroll position and unsaved annotations; drag to reorder
 - 🪟 **Split view inside a tab**: two PDFs side by side (check answers, original vs. translation), each with its own scroll, zoom and annotations; optional synced scrolling
 - ✋ **Hand tool**: drag to pan; middle-mouse drag pans with any tool
-- 🖍 **Annotations**: highlight, pen, text (CJK supported), colors, undo; written into the PDF on save
+- 🧭 **Ribbon UI** (File / Home / Annotate / Edit / View / Stealth / Help), collapsible, plus a status bar
+- 🎨 **Themes**: dark / light / sepia / follow system, and page reading colors (normal / sepia / night)
+- 🖍 **Annotations**: text highlight / underline / strikethrough (select text first), area highlight, pen, rectangle, text (CJK supported), eraser, colors, undo & redo; written into the PDF on save
+- 📄 **Page editing**: rotate, delete, insert blank page, merge PDFs, extract pages (written on save)
+- 🔎 **Reading**: text selection and copy, full-text find, thumbnail / outline sidebar, two-page view, fit page, fullscreen, print, export page as image, document properties, recent files
 - 🔍 **Viewing**: continuous scroll, lazy rendering, zoom, fit width, page jump, keyboard paging
 - 🪟 **Window opacity** 20%–100% (slider, tray menu, global hotkeys)
 - 🔒 **Privacy-friendly**: no network access, no telemetry, no key logging (see [Privacy & Security](#privacy--security))
 - 📂 **File association** (installer): double-click a PDF to open it as a new tab in the running window
 
 ## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/light.png" alt="Light theme" width="860"><br>
+  <sub>Light theme and the View ribbon (also dark / sepia / follow system)</sub>
+</p>
 
 <p align="center">
   <img src="docs/screenshots/main.png" alt="Main window" width="860">
@@ -79,14 +88,14 @@ Requires Windows 10/11 (64-bit). Builds are not code-signed, so SmartScreen may 
 ## Quick Start
 
 1. After launch the window stays visible for about 4 seconds, then enters stealth mode; a tray icon appears.
-2. **Set a trigger key first.** The default is **Fn**, but most keyboards handle Fn in firmware and never report it to Windows. So Fn starts out *unbound*, and while unbound the window stays **always visible** so you are never locked out. Click the trigger button on the right of the toolbar and bind a key by recording it or choosing a preset (**Right Alt** is a good one).
+2. **Set a trigger key first.** The default is **Fn**, but most keyboards handle Fn in firmware and never report it to Windows. So Fn starts out *unbound*, and while unbound the window stays **always visible** so you are never locked out. Open the Stealth tab in the ribbon (or the status bar) and click the trigger button and bind a key by recording it or choosing a preset (**Right Alt** is a good one).
 3. Hold the trigger key and move the cursor onto the window to show it; release or move away to hide it.
 
 ## Usage
 
 ### Choosing a trigger key
 
-Click the trigger button in the toolbar (yellow while unbound) or use the tray menu:
+Click the trigger button (Stealth tab or status bar; yellow while unbound) or use the tray menu:
 
 - **Record**: press "Start recording" and hit the key you want within 10 seconds. Any keyboard key works, as do mouse middle / back / forward; left and right clicks are ignored. `Esc` cancels.
 - **Presets**: Fn, Right Alt, Right Ctrl, ScrollLock, mouse back / forward / middle.
@@ -95,7 +104,7 @@ Right Alt, ScrollLock and F13–F24 are the least intrusive. Avoid Shift/Ctrl (t
 
 ### Stealth switch
 
-The rightmost toolbar button (also in the tray menu and on `Ctrl+Alt+H`) toggles stealth on/off. With it off, the window is always visible like a normal reader. The window is also kept visible during the first 4 seconds after launch, while file dialogs are open, while a mouse button is held to draw or drag, and while the trigger is unbound.
+The stealth button (Stealth tab and status bar; also in the tray menu and on `Ctrl+Alt+H`) toggles stealth on/off. With it off, the window is always visible like a normal reader. The window is also kept visible during the first 4 seconds after launch, while file dialogs are open, while a mouse button is held to draw or drag, and while the trigger is unbound.
 
 ### Tabs
 
@@ -116,13 +125,13 @@ Typical use: check your homework against the answer key, or read an original nex
 
 | Action | Result |
 |---|---|
-| Toolbar "Split" button / `Ctrl+\` | Open another PDF on the right of the current tab. If other single-file tabs exist you can pick "Choose file…" or merge one of them in |
+| Home → "Split" button / `Ctrl+\` | Open another PDF on the right of the current tab. If other single-file tabs exist you can pick "Choose file…" or merge one of them in |
 | Click "Split" again | Un-split (closes the right pane) |
 | × in a pane header | Close that pane; the other stays in the tab |
 | Drag the divider | Resize; double-click to reset to 50% |
 | Click a pane / `F6` | Change the focused pane (blue line under its header) |
-| Toolbar "Sync scroll" | One pane scrolls, the other moves by the same distance |
-| Toolbar "Swap" | Swap left and right |
+| Home → "Sync scroll" | One pane scrolls, the other moves by the same distance |
+| Home → "Swap" | Swap left and right |
 
 Notes: the two panes are fully independent (zoom, scroll, unsaved annotations, with orange dots on the tab and the pane header). Zoom, page number, undo, save and fit-width act on the **focused pane**; Save writes only that pane's file. Entering split view fits both panes to half width and un-splitting restores the previous zoom. A tab holds at most two panes (no top/bottom split).
 
@@ -131,11 +140,15 @@ Notes: the two panes are fully independent (zoom, scroll, unsaved annotations, w
 | Tool | Key | Usage |
 |---|:---:|---|
 | Hand | `H` | Drag to pan (default tool) |
-| Highlight | `M` | Drag a rectangle |
+| Select text | `V` | Drag to select, `Ctrl+C` to copy |
+| Text highlight / underline / strikethrough | — | Select text, then click the button in the Annotate tab |
+| Area highlight | `M` | Drag a rectangle |
 | Pen | `P` | Freehand drawing |
+| Rectangle | `R` | Drag a box |
 | Text | `T` | Click, type, `Enter` to confirm, `Esc` to cancel |
+| Eraser | `E` | Click an unsaved annotation to delete it |
 
-`Ctrl+Z` undoes the last unsaved annotation of the current tab. Saving writes annotations into the PDF and reloads it.
+`Ctrl+Z` undoes, `Ctrl+Y` redoes. Saving writes annotations into the PDF and reloads it.
 
 ### Shortcuts
 
@@ -145,7 +158,12 @@ Notes: the two panes are fully independent (zoom, scroll, unsaved annotations, w
 | Ctrl+Alt+↑ / ↓ (global) | Opacity +10% / −10% |
 | Ctrl+O | Open (multi-select) |
 | Ctrl+S / Ctrl+Shift+S | Save / Save as |
-| Ctrl+Z | Undo annotation |
+| Ctrl+Z / Ctrl+Y | Undo / redo annotation |
+| Ctrl+F / F3 / Shift+F3 | Find / next / previous |
+| Ctrl+P | Print |
+| Ctrl+G | Go to page |
+| F4 | Sidebar (thumbnails / outline) |
+| F11 | Fullscreen (Esc to exit) |
 | Ctrl+W | Close tab (whole tab when split) |
 | Ctrl+\ | Split / un-split |
 | F6 | Switch focused pane in split view |
@@ -153,7 +171,7 @@ Notes: the two panes are fully independent (zoom, scroll, unsaved annotations, w
 | Ctrl+1 … 8 / Ctrl+9 | N-th tab / last tab |
 | Ctrl + wheel / Ctrl + `+` / `-` | Zoom |
 | Ctrl+0 | Fit width |
-| H / M / P / T | Hand / Highlight / Pen / Text |
+| H / V / M / P / T / R / E | Hand / Select / Area highlight / Pen / Text / Rect / Eraser |
 | Middle-mouse drag | Pan with any tool |
 
 ### Settings and data
@@ -185,8 +203,8 @@ To know the trigger key state while it is not the foreground app, StealthPDF ins
 1. The trigger key's native function still fires (hooks can observe, not suppress). E.g. a mouse back button still navigates in browsers. Prefer side-effect-free keys.
 2. Fn usually cannot be detected (see above).
 3. If the foreground app runs elevated, a non-elevated StealthPDF receives no input events (UIPI); run StealthPDF as administrator.
-4. Annotations may be offset on pages with a `/Rotate` attribute.
-5. Encrypted PDFs are not supported.
+4. Saved annotations cannot be edited or deleted. Rotating pages (Edit → Rotate pages) is refused while that page has unsaved annotations; view rotation is display-only and also unavailable while unsaved annotations exist.
+5. Encrypted PDFs can be read after entering the password, but cannot be saved with annotations or page-edited.
 6. Existing annotations/text cannot be edited; only new ones can be added.
 7. CJK text annotations need `simhei.ttf` or `msyh.ttf` from Windows; otherwise non-ASCII characters become `?`.
 8. Save overwrites the original file; use Save as for important documents.
@@ -213,7 +231,7 @@ See [docs/BUILDING.md](docs/BUILDING.md) and [docs/ARCHITECTURE.md](docs/ARCHITE
 
 ## Contributing
 
-Issues and PRs are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Ideas: restore tabs and split layout on launch, text search, editing existing annotations, rotation-aware annotation, i18n.
+Issues and PRs are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Ideas: restore tabs and split layout on launch, OCR, editing existing annotations, more print options tested on real printers, i18n.
 
 ## License
 
